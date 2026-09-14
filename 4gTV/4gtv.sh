@@ -19,8 +19,8 @@ OPENRC_FILE="/etc/init.d/${SERVICE_NAME}"
 ENV_FILE="$APP_DIR/env"
 MARK="# managed-by: 4gtv.sh"
 
-DOWNLOAD_URL="${FOURGTV_PUBLIC_URL:-https://raw.githubusercontent.com/YanG-1989/rust/main/4gTV/4gtv-linux-{arch}}"
-SELF_URL="${FOURGTV_PUBLIC_SELF_URL:-https://raw.githubusercontent.com/YanG-1989/rust/main/4gTV/4gtv.sh}"
+DOWNLOAD_URL="${FOURGTV_PUBLIC_URL:-https://gh-proxy.com/raw.githubusercontent.com/YanG-1989/rust/main/4gTV/4gtv-linux-{arch}}"
+SELF_URL="${FOURGTV_PUBLIC_SELF_URL:-https://gh-proxy.com/raw.githubusercontent.com/YanG-1989/rust/main/4gTV/4gtv.sh}"
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;36m'
 DIM='\033[2m'; NC='\033[0m'
