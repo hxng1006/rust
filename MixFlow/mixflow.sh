@@ -9,7 +9,7 @@
 
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ============================================================
 #  ★ 你的下载地址（已按你的实际布局填好）★
@@ -40,6 +40,8 @@ OPENRC_FILE="/etc/init.d/${SERVICE_NAME}"
 MARK="# managed-by: mixflow.sh"
 # 可选：把二进制软链到 PATH，这样能全局 `mixflow panel --port ...`
 CLI_LINK="/usr/local/bin/mixflow"
+# 管理菜单脚本自身也装一份到 PATH，本地直接敲 mixflow.sh 就进菜单
+SCRIPT_LINK="/usr/local/bin/mixflow.sh"
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLU='\033[0;36m'
 DIM='\033[2m'; NC='\033[0m'
@@ -78,6 +80,10 @@ bootstrap_if_remote() {
         err "换地址：MIXFLOW_SELF_URL=https://... bash <(curl -sL https://...)"
         exit 1
     fi
+    local ssz; ssz="$(wc -c < "$tmp" 2>/dev/null | tr -d ' ')"
+    if [ "${ssz:-0}" -lt 10000 ]; then
+        rm -f "$tmp"; err "下载到的脚本只有 ${ssz:-0} 字节，不完整，已丢弃"; exit 1
+    fi
     head -1 "$tmp" | grep -q '^#!' || {
         rm -f "$tmp"; err "下载到的不是脚本（地址可能返回了错误页）"; exit 1
     }
@@ -99,7 +105,7 @@ SELF="$(self_path)"
 # ============================================================
 has_systemd() { [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; }
 has_openrc()  { command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; }
-is_installed() { [ -x "$BIN" ]; }
+is_installed() { [ -x "$BIN" ] && looks_like_elf "$BIN" && [ "$(file_size "$BIN")" -ge "$MIN_BIN_SIZE" ]; }
 
 # ---- 服务抽象层：systemd 与 OpenRC(Alpine) 统一入口 ----
 # 是否已被任一 init 系统托管
@@ -180,6 +186,11 @@ download_url() {
     fi
     echo "${url//\{arch\}/$arch}"
 }
+
+# 最小体积保护：太小的一律不要（几百字节通常是跳转页 / 错误页 / wrapper）
+MIN_BIN_SIZE="${MIXFLOW_MIN_BIN_SIZE:-1048576}"   # 二进制至少 1MB（正常约 3MB）
+MIN_SCRIPT_SIZE=10000                              # 脚本至少 10KB（正常约 30KB）
+file_size() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
 
 # 下回来的得是个 ELF 可执行文件，不是 404 的 HTML 页
 looks_like_elf() {
@@ -379,6 +390,39 @@ EOF
     chmod 755 "$OPENRC_FILE"
 }
 
+# 生成 /usr/local/bin/mixflow wrapper（幂等，可重复调用）
+# 无参数 + 交互终端 → 进 mixflow.sh 菜单；`mixflow menu` 同样进菜单；
+# 其余参数 → 透传给二进制（systemd 的 ExecStart 不受影响）
+write_cli_wrapper() {
+    # 旧版本可能把 CLI_LINK 做成指向二进制的软链接，直接 cat > 会顺着链接把二进制覆盖掉
+    rm -f "$CLI_LINK"
+    cat > "$CLI_LINK" <<EOF
+#!/usr/bin/env bash
+# mixflow CLI wrapper (由 mixflow.sh 生成)
+BIN="$BIN"
+if { [ \$# -eq 0 ] && [ -t 0 ]; } || [ "\${1:-}" = "menu" ]; then
+    if command -v mixflow.sh >/dev/null 2>&1; then
+        exec mixflow.sh menu
+    fi
+    echo "管理菜单请用： mixflow.sh" >&2
+    echo "直接启动服务： mixflow run -c $CONFIG" >&2
+    exit 1
+fi
+exec "\$BIN" "\$@"
+EOF
+    chmod +x "$CLI_LINK" 2>/dev/null && info "已安装 $CLI_LINK（无参数进菜单，带参数透传二进制）" || true
+}
+
+# 进菜单时自检：已安装但入口缺失就补上（仅 root 才写得进 /usr/local/bin）
+ensure_entrypoints() {
+    is_installed || return 0
+    [ "$(id -u)" -eq 0 ] || return 0
+    if [ -L "$CLI_LINK" ] || ! grep -q 'mixflow CLI wrapper' "$CLI_LINK" 2>/dev/null; then
+        write_cli_wrapper
+    fi
+    [ -x "$SCRIPT_LINK" ] || install_self
+}
+
 # 下载二进制到位（安装或更新都走这里）
 download_binary() {
     local arch url tmp
@@ -391,6 +435,13 @@ download_binary() {
         rm -f "$tmp"; err "下载失败。检查 MIXFLOW_REPO / 资产名，或用 MIXFLOW_URL 指定完整地址"
         return 1
     fi
+    local sz; sz="$(file_size "$tmp")"
+    if [ "${sz:-0}" -lt "$MIN_BIN_SIZE" ]; then
+        rm -f "$tmp"
+        err "下载到的文件只有 ${sz:-0} 字节（正常应 ≥ $((MIN_BIN_SIZE/1024/1024))MB），已丢弃，未安装。"
+        err "多半是被跳转页 / 错误页 / 网络拦截替换了，请检查网络或 MIXFLOW_URL"
+        return 1
+    fi
     if ! looks_like_elf "$tmp"; then
         rm -f "$tmp"
         err "下载到的不是 ELF 二进制（多半是 404 页面）。请确认 Release 里有：$(basename "$url")"
@@ -399,21 +450,33 @@ download_binary() {
     chmod +x "$tmp"
     mv -f "$tmp" "$BIN"
     info "二进制就位：$BIN"
-    # 方便全局用 CLI（改端口/密码/暗门都靠它）
-    ln -sf "$BIN" "$CLI_LINK" 2>/dev/null && info "已软链到 $CLI_LINK（可直接用 mixflow 命令）" || true
+    write_cli_wrapper
+    # 管理菜单脚本自身也装一份：本地直接敲 mixflow.sh 就进菜单，不用每次 curl
+    # （管道执行时 SELF 是 bootstrap 落盘的临时文件，拷出来照样可用）
+    install_self
+}
+
+# 把本脚本装到 PATH（幂等）。管道/远程执行时 SELF 为临时落盘文件，同样可装。
+install_self() {
+    [ -n "${SELF:-}" ] && [ -f "$SELF" ] || return 0
+    # 跳过 /dev/fd 这种还没落盘的（正常走不到，bootstrap 已处理）
+    case "$SELF" in /dev/fd/*|/proc/self/fd/*) return 0 ;; esac
+    if [ "$SELF" -ef "$SCRIPT_LINK" 2>/dev/null ]; then return 0; fi
+    cp -f "$SELF" "$SCRIPT_LINK" 2>/dev/null && chmod +x "$SCRIPT_LINK" 2>/dev/null \
+        && info "管理菜单已装到 $SCRIPT_LINK（本地直接敲 mixflow.sh）" || true
 }
 
 cmd_install() {
     need_root "$@"
     local fresh=0
-    is_installed || fresh=1
+    [ -f "$CONFIG" ] || fresh=1
 
     download_binary || return 1
 
     # 首次安装：生成默认配置，然后按用户输入设端口 / 暗门 / 密码
     if [ ! -f "$CONFIG" ]; then
         step "生成默认配置 $CONFIG"
-        "$BIN" init -c "$CONFIG" >/dev/null 2>&1 || {
+        "$BIN" init -c "$CONFIG" </dev/null >/dev/null 2>&1 || {
             err "初始化配置失败"; return 1
         }
     fi
@@ -423,7 +486,7 @@ cmd_install() {
             # 全自动：默认端口 + 随机隐藏入口 + 保持默认密码 admin123（无提问）
             local port=12321 path
             path="$(rand_path)"
-            "$BIN" panel --port "$port" --path "$path" -c "$CONFIG" \
+            "$BIN" panel --port "$port" --path "$path" -c "$CONFIG" </dev/null \
                 || { err "写入面板设置失败"; return 1; }
         else
             echo
@@ -444,7 +507,7 @@ cmd_install() {
             local args=( panel --port "$port" -c "$CONFIG" )
             if [ "$path" != "off" ]; then args+=( --path "$path" ); else args+=( --path off ); fi
             [ -n "$pass" ] && args+=( --pass "$pass" )
-            "$BIN" "${args[@]}" || { err "写入面板设置失败"; return 1; }
+            "$BIN" "${args[@]}" </dev/null || { err "写入面板设置失败"; return 1; }
         fi
     fi
 
@@ -600,7 +663,8 @@ cmd_uninstall() {
         rm -f "$OPENRC_FILE"
         info "服务已移除"
     fi
-    [ -L "$CLI_LINK" ] && rm -f "$CLI_LINK"
+    [ -f "$CLI_LINK" ] && rm -f "$CLI_LINK" && info "已移除 $CLI_LINK"
+    [ -f "$SCRIPT_LINK" ] && rm -f "$SCRIPT_LINK" && info "已移除 $SCRIPT_LINK"
     echo
     read -r -p "连同 $APP_DIR (含二进制和配置) 一起删掉? [y/N] " c
     if [[ "${c:-N}" =~ ^[Yy]$ ]]; then
@@ -624,11 +688,13 @@ state_line() {
 pause() { echo; read -r -p "按回车返回 ..." _; }
 
 main_menu() {
+    ensure_entrypoints >/dev/null 2>&1
     while true; do
         clear 2>/dev/null || true
         echo -e "${BLU}=============================================${NC}"
         echo -e "        mixflow 安装 · 管理   ${DIM}v${VERSION}${NC}"
         echo -e "${BLU}=============================================${NC}"
+        echo -e "  ${DIM}mixflow=二进制CLI · mixflow.sh=本菜单${NC}"
         echo -e "  状态: $(state_line)"
         if is_installed; then
             echo -e "  目录: ${DIM}${APP_DIR}${NC}"
@@ -698,6 +764,7 @@ mixflow 安装 · 管理脚本 v${VERSION}
   path <P|off>         改隐藏入口路径（off = 关闭）
   pass <密码> [用户名] 改面板密码 / 用户名
   uninstall            卸载
+  self-install         把本脚本装到 /usr/local/bin/mixflow.sh（本地直接敲）
 
 安装位置：${APP_DIR}
 配置文件：${CONFIG}
@@ -725,6 +792,7 @@ case "$cmd" in
     path)             [ -n "${1:-}" ] && { need_root; "$BIN" panel --path "$1" -c "$CONFIG" && restart_note && show_panel_url; } || cmd_set_path ;;
     pass)             if [ -n "${1:-}" ]; then need_root; a=( panel --pass "$1" -c "$CONFIG" ); [ -n "${2:-}" ] && a+=( --user "$2" ); "$BIN" "${a[@]}" && restart_note; else cmd_set_pass; fi ;;
     uninstall|remove) cmd_uninstall "$@" ;;
+    self-install)     need_root "$@"; install_self ;;
     -h|--help|help)   usage ;;
     -v|--version)     echo "v${VERSION}" ;;
     *) err "未知命令: $cmd"; echo; usage; exit 1 ;;

@@ -2,6 +2,8 @@
 
 **IPTV 代理 + Web 管理面板 · 一键部署**
 
+[English](README.en.md) | **简体中文**
+
 代理 / 重定向 / 改写 / DASH 四种转发模式 | EPG 节目单 · 台标 · 回看 · 定时录制 | Token 鉴权 + IP 封禁
 
 ![arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7-blue)
@@ -43,7 +45,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/YanG-1989/rust/main/IPTV%20P
 | 命令 | 作用 |
 | --- | --- |
 | `iptv-proxy` | 打开管理菜单 |
-| `iptv-proxy update` | 更新二进制到最新版 |
+| `iptv-proxy update` | 更新二进制到最新版（保留配置） |
+| `iptv-proxy reinstall` | 重装（先备份配置再清空重来） |
 | `iptv-proxy port <N>` | 改面板端口 |
 | `iptv-proxy pass <密码> [账号]` | 改面板密码 / 账号（**忘密码也能改**，不用进面板） |
 | `iptv-proxy restart` | 重启服务 |
@@ -70,3 +73,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/YanG-1989/rust/main/IPTV%20P
 - **ffmpeg 可选**：只有面板「视频素材」的 MP4 → HLS 转码用得上，不装不影响正常代理。
 - 面板密码在配置里存的是 SHA-256，明文不落盘。
 - 想换下载源：`IPTV_URL=https://你的地址/iptv-proxy-linux-{arch} bash <(curl -fsSL ...)`
+
+## 📝 更新日志
+
+最近更新见 [CHANGELOG.md](CHANGELOG.md)。
